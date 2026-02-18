@@ -262,6 +262,11 @@ function normalizeToToolResult(input: RawHyphenatedToolResult) {
  * Accepts: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'tool-call' | 'tool-call-result'
  * All types validated by their respective schemas with .passthrough() for unknown fields
  */
+const rawImageContentSchema = z.object({
+    type: z.literal('image'),
+    source: z.any(),
+}).passthrough();
+
 const rawAgentContentSchema = z.union([
     rawTextContentSchema,
     rawToolUseContentSchema,
@@ -269,6 +274,8 @@ const rawAgentContentSchema = z.union([
     rawThinkingContentSchema,
     rawHyphenatedToolCallSchema,
     rawHyphenatedToolResultSchema,
+    rawImageContentSchema,
+    z.object({ type: z.string() }).passthrough(),  // Catch-all for unknown content types
 ]);
 export type RawAgentContent = z.infer<typeof rawAgentContentSchema>;
 
@@ -278,7 +285,7 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
         z.object({ type: z.literal('system') }),
         z.object({ type: z.literal('result') }),
         z.object({ type: z.literal('summary'), summary: z.string() }),
-        z.object({ type: z.literal('assistant'), message: z.object({ role: z.literal('assistant'), model: z.string(), content: z.array(rawAgentContentSchema), usage: usageDataSchema.optional() }), parent_tool_use_id: z.string().nullable().optional() }),
+        z.object({ type: z.literal('assistant'), message: z.object({ role: z.literal('assistant'), model: z.string(), content: z.union([z.string(), z.array(rawAgentContentSchema)]), usage: usageDataSchema.optional() }), parent_tool_use_id: z.string().nullable().optional() }),
         z.object({ type: z.literal('user'), message: z.object({ role: z.literal('user'), content: z.union([z.string(), z.array(rawAgentContentSchema)]) }), parent_tool_use_id: z.string().nullable().optional(), toolUseResult: z.any().nullable().optional() }),
     ]), z.object({
         isSidechain: z.boolean().nullish(),
@@ -308,7 +315,12 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
             callId: z.string(),
             output: z.any(),
             id: z.string()
-        })
+        }),
+        z.object({
+            type: z.literal('token_count'),
+            info: z.any().optional(),
+            rate_limits: z.any().optional(),
+        }).passthrough()
     ])
 }), z.object({
     type: z.literal('session'),
@@ -765,7 +777,26 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                     return null;
                 }
                 let content: NormalizedAgentContent[] = [];
-                for (let c of raw.content.data.message.content) {
+                const messageContent = raw.content.data.message.content;
+                if (typeof messageContent === 'string') {
+                    content.push({
+                        type: 'text',
+                        text: messageContent,
+                        uuid: raw.content.data.uuid,
+                        parentUUID: raw.content.data.parentUuid ?? null
+                    } as NormalizedAgentContent);
+                    return {
+                        id,
+                        localId,
+                        createdAt,
+                        role: 'agent',
+                        isSidechain: raw.content.data.isSidechain ?? false,
+                        content,
+                        meta: raw.meta,
+                        usage: raw.content.data.message.usage
+                    };
+                }
+                for (let c of messageContent) {
                     if (c.type === 'text') {
                         content.push({
                             ...c,  // WOLOG: Preserve all fields including unknown ones
